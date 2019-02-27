@@ -16,6 +16,8 @@
 package retrofit2;
 
 import java.io.IOException;
+import java.util.regex.Pattern;
+import javax.annotation.Nullable;
 import okhttp3.FormBody;
 import okhttp3.Headers;
 import okhttp3.HttpUrl;
@@ -31,22 +33,38 @@ final class RequestBuilder {
       { '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'A', 'B', 'C', 'D', 'E', 'F' };
   private static final String PATH_SEGMENT_ALWAYS_ENCODE_SET = " \"<>^`{}|\\?#";
 
+  /**
+   * Matches strings that contain {@code .} or {@code ..} as a complete path segment. This also
+   * matches dots in their percent-encoded form, {@code %2E}.
+   *
+   * <p>It is okay to have these strings within a larger path segment (like {@code a..z} or {@code
+   * index.html}) but when alone they have a special meaning. A single dot resolves to no path
+   * segment so {@code /one/./three/} becomes {@code /one/three/}. A double-dot pops the preceding
+   * directory, so {@code /one/../three/} becomes {@code /three/}.
+   *
+   * <p>We forbid these in Retrofit paths because they're likely to have the unintended effect.
+   * For example, passing {@code ..} to {@code DELETE /account/book/{isbn}/} yields {@code DELETE
+   * /account/}.
+   */
+  private static final Pattern PATH_TRAVERSAL = Pattern.compile("(.*/)?(\\.|%2e|%2E){1,2}(/.*)?");
+
   private final String method;
 
   private final HttpUrl baseUrl;
-  private String relativeUrl;
-  private HttpUrl.Builder urlBuilder;
+  private @Nullable String relativeUrl;
+  private @Nullable HttpUrl.Builder urlBuilder;
 
   private final Request.Builder requestBuilder;
-  private MediaType contentType;
+  private @Nullable MediaType contentType;
 
   private final boolean hasBody;
-  private MultipartBody.Builder multipartBuilder;
-  private FormBody.Builder formBuilder;
-  private RequestBody body;
+  private @Nullable MultipartBody.Builder multipartBuilder;
+  private @Nullable FormBody.Builder formBuilder;
+  private @Nullable RequestBody body;
 
-  RequestBuilder(String method, HttpUrl baseUrl, String relativeUrl, Headers headers,
-      MediaType contentType, boolean hasBody, boolean isFormEncoded, boolean isMultipart) {
+  RequestBuilder(String method, HttpUrl baseUrl,
+      @Nullable String relativeUrl, @Nullable Headers headers, @Nullable MediaType contentType,
+      boolean hasBody, boolean isFormEncoded, boolean isMultipart) {
     this.method = method;
     this.baseUrl = baseUrl;
     this.relativeUrl = relativeUrl;
@@ -69,13 +87,16 @@ final class RequestBuilder {
   }
 
   void setRelativeUrl(Object relativeUrl) {
-    if (relativeUrl == null) throw new NullPointerException("@Url parameter is null.");
     this.relativeUrl = relativeUrl.toString();
   }
 
   void addHeader(String name, String value) {
     if ("Content-Type".equalsIgnoreCase(name)) {
-      contentType = MediaType.parse(value);
+      try {
+        contentType = MediaType.get(value);
+      } catch (IllegalArgumentException e) {
+        throw new IllegalArgumentException("Malformed content type: " + value, e);
+      }
     } else {
       requestBuilder.addHeader(name, value);
     }
@@ -86,7 +107,13 @@ final class RequestBuilder {
       // The relative URL is cleared when the first query parameter is set.
       throw new AssertionError();
     }
-    relativeUrl = relativeUrl.replace("{" + name + "}", canonicalizeForPath(value, encoded));
+    String replacement = canonicalizeForPath(value, encoded);
+    String newRelativeUrl = relativeUrl.replace("{" + name + "}", replacement);
+    if (PATH_TRAVERSAL.matcher(newRelativeUrl).matches()) {
+      throw new IllegalArgumentException(
+          "@Path parameters shouldn't perform path traversal ('.' or '..'): " + value);
+    }
+    relativeUrl = newRelativeUrl;
   }
 
   private static String canonicalizeForPath(String input, boolean alreadyEncoded) {
@@ -138,7 +165,7 @@ final class RequestBuilder {
     }
   }
 
-  void addQueryParam(String name, String value, boolean encoded) {
+  void addQueryParam(String name, @Nullable String value, boolean encoded) {
     if (relativeUrl != null) {
       // Do a one-time combination of the built relative URL and the base URL.
       urlBuilder = baseUrl.newBuilder(relativeUrl);
@@ -150,12 +177,15 @@ final class RequestBuilder {
     }
 
     if (encoded) {
+      //noinspection ConstantConditions Checked to be non-null by above 'if' block.
       urlBuilder.addEncodedQueryParameter(name, value);
     } else {
+      //noinspection ConstantConditions Checked to be non-null by above 'if' block.
       urlBuilder.addQueryParameter(name, value);
     }
   }
 
+  @SuppressWarnings("ConstantConditions") // Only called when isFormEncoded was true.
   void addFormField(String name, String value, boolean encoded) {
     if (encoded) {
       formBuilder.addEncoded(name, value);
@@ -164,10 +194,12 @@ final class RequestBuilder {
     }
   }
 
+  @SuppressWarnings("ConstantConditions") // Only called when isMultipart was true.
   void addPart(Headers headers, RequestBody body) {
     multipartBuilder.addPart(headers, body);
   }
 
+  @SuppressWarnings("ConstantConditions") // Only called when isMultipart was true.
   void addPart(MultipartBody.Part part) {
     multipartBuilder.addPart(part);
   }
@@ -176,13 +208,18 @@ final class RequestBuilder {
     this.body = body;
   }
 
-  Request build() {
+  <T> void addTag(Class<T> cls, @Nullable T value) {
+    requestBuilder.tag(cls, value);
+  }
+
+  Request.Builder get() {
     HttpUrl url;
     HttpUrl.Builder urlBuilder = this.urlBuilder;
     if (urlBuilder != null) {
       url = urlBuilder.build();
     } else {
       // No query parameters triggered builder creation, just combine the relative URL and base URL.
+      //noinspection ConstantConditions Non-null if urlBuilder is null.
       url = baseUrl.resolve(relativeUrl);
       if (url == null) {
         throw new IllegalArgumentException(
@@ -214,8 +251,7 @@ final class RequestBuilder {
 
     return requestBuilder
         .url(url)
-        .method(method, body)
-        .build();
+        .method(method, body);
   }
 
   private static class ContentTypeOverridingRequestBody extends RequestBody {

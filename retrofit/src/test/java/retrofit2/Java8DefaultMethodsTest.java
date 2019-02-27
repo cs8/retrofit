@@ -39,7 +39,7 @@ public final class Java8DefaultMethodsTest {
   //
   //  Response<String> response = example.user().execute();
   //  assertThat(response.body()).isEqualTo("Hi");
-  //  Response<String> response = example.user("hi").execute();
-  //  assertThat(response.body()).isEqualTo("Hi");
+  //  Response<String> response2 = example.user("Hi").execute();
+  //  assertThat(response2.body()).isEqualTo("Hi");
   //}
 }

@@ -1,6 +1,123 @@
 Change Log
 ==========
 
+Version 2.5.0 *(2018-11-18)*
+----------------------------
+
+ * New: Built-in support for Kotlin's `Unit` type. This behaves the same as Java's `Void` where the body
+   content is ignored and immediately discarded.
+ * New: Built-in support for Java 8's `Optional` and `CompletableFuture` types. Previously the 'converter-java8'
+   and 'adapter-java8' dependencies were needed and explicitly adding `Java8OptionalConverterFactory` and/or
+   `Java8CallAdapterFactory` to your `Retrofit.Builder` in order to use these types. Support is now built-in and
+   those types and their artifacts are marked as deprecated.
+ * New: `Invocation` class provides a reference to the invoked method and argument list as a tag on the
+   underlying OkHttp `Call`. This can be accessed from an OkHttp interceptor for things like logging, analytics,
+   or metrics aggregation.
+ * New: Kotlin extension for `Retrofit` which allows you call `create` passing the interface type only as
+   a generic parameter (e.g., `retrofit.create<MyService>()`).
+ * New: Added `Response.success` overload which allows specifying a custom 2xx status code.
+ * New: Added `Calls.failure` overload which allows passing any `Throwable` subtype.
+ * New: Minimal R8 rules now ship inside the jar requiring no client configuration in the common case.
+ * Fix: Do not propagate fatal errors to the callback. They are sent to the thread's uncaught
+   exception handler.
+ * Fix: Do not enqueue/execute an otherwise useless call when the RxJava type is disposed by `onSubscribe`.
+ * Fix: Call `RxJavaPlugins` assembly hook when creating an RxJava 2 type.
+ * Fix: Ensure both the Guava and Java 8 `Optional` converters delegate properly. This ensures that converters
+   registered prior to the optional converter can be used for deserializing the body type.
+ * Fix: Prevent `@Path` values from participating in path-traversal. This ensures untrusted input passed as
+   a path value cannot cause you to make a request to an un-intended relative URL.
+ * Fix: Simple XML converter (which is deprecated) no longer wraps subtypes of `RuntimeException`
+   or `IOException` when it fails.
+ * Fix: Prevent JAXB converter from loading remote entities and DTDs.
+ * Fix: Correctly detect default methods in interfaces on Android (API 24+). These still do not work, but
+   now a correct exception will be thrown when detected.
+ * Fix: Report more accurate exceptions when a `@QueryName` or `@QueryMap` precedes a `@Url` parameter.
+ * Update OkHttp dependency to 3.12.
+
+
+Version 2.4.0 *(2018-03-14)*
+----------------------------
+
+ * New: `Retrofit.Builder` exposes mutable lists of the added converter and call adapter factories.
+ * New: Call adapter added for Scala's `Future`.
+ * New: Converter for JAXB replaces the now-deprecated converter for Simple XML Framework.
+ * New: Add Java 9 automatic module names for each artifact corresponding to their root package.
+ * Fix: Do not swallow `Error`s from callbacks (usually `OutOfMemoryError`).
+ * Fix: Moshi and Gson converters now assert that the full response was consumed. This prevents
+   hiding bugs in faulty adapters which might not have consumed the full JSON input which would
+   then cause failures on the next request over that connection.
+ * Fix: Do not conflate OkHttp `Call` cancelation with RxJava unsubscription/disposal. Prior to
+   this change, canceling of a `Call` would prevent a cancelation exception from propagating down
+   the Rx stream.
+
+
+Version 2.3.0 *(2017-05-13)*
+----------------------------
+
+ *  **Retrofit now uses `@Nullable` to annotate all possibly-null values.** We've
+    added a compile-time dependency on the JSR 305 annotations. This is a
+    [provided][maven_provided] dependency and does not need to be included in
+    your build configuration, `.jar` file, or `.apk`. We use
+    `@ParametersAreNonnullByDefault` and all parameters and return types are
+    never null unless explicitly annotated `@Nullable`.
+
+    **Warning: this release is source-incompatible for Kotlin users.**
+    Nullability was previously ambiguous and lenient but now the compiler will
+    enforce strict null checks.
+
+ * New: Converters added for Java 8's and Guava's `Optional` which wrap a potentially-nullable
+   response body. These converters still rely on normal serialization library converters for parsing
+   the response bytes into an object.
+ * New: String converters that return `null` for an `@Query` or `@Field` parameter are now skipped.
+ * New: The mock module's `NetworkBehavior` now throws a custom subclass of `IOException` to more
+   clearly indicate the exception's source.
+ * RxJava 1.x converter updated to 1.3.0 which stabilizes the use of `Completable`.
+ * Fix: Add explicit handling for `OnCompleteFailedException`, `OnErrorFailedException`, and
+   `OnErrorNotImplementedException` for RxJava 1.x to ensure they're correct delivered to the
+   plugins/hooks for handling.
+ * Fix: `NoSuchElementException` thrown when unsubscribing from an RxJava 1.x `Single`.
+
+
+Version 2.2.0 *(2017-02-21)*
+----------------------------
+
+ * RxJava 2.x is now supported with a first-party 'adapter-rxjava2' artifact.
+ * New: `@QueryName` annotation allows creating a query parameter with no '=' separator or value.
+ * New: Support for messages generated by Protobuf 3.0 or newer when using the converter for Google's
+   protobuf.
+ * New: RxJava 1.x call adapter now correctly handles broken subscribers whose methods throw exceptions.
+ * New: Add `toString()` implementations for `Response` and `Result`.
+ * New: The Moshi converter factory now offers methods for enabling null serialization and lenient
+   parsing.
+ * New: Add `createAsync()` to RxJava 1.x call adapter factory which executes requests using
+   `Call.enqueue()` using the underlying HTTP client's asynchronous support.
+ * New: `NetworkBehavior` now allows setting an error percentage and returns HTTP errors when triggered.
+ * `HttpException` has been moved into the main artifact and should be used instead of the versions
+   embedded in each adapter (which have been deprecated).
+ * Promote the response body generic type on `CallAdapter` from the `adapt` method to the enclosing
+   class. This is a source-incompatible but binary-compatible change which is only relevant if you are
+   implementing your own `CallAdapter`s.
+ * Remove explicit handling of the now-defunct RoboVM platform.
+ * Fix: Close response on HTTP 204 and 205 to avoid resource leak.
+ * Fix: Reflect the canceled state of the HTTP client's `Call` in Retrofit's `Call`.
+ * Fix: Use supplied string converters for the `String` type on non-body parameters. This allows user
+   converters to handle cases such as when annotating string parameters instead of them always using
+   the raw string.
+ * Fix: Skip a UTF-8 BOM (if present) when using the converter for Moshi.
+
+
+Version 2.1.0 *(2016-06-15)*
+----------------------------
+
+ * New: `@HeaderMap` annotation and support for supplying an arbitrary number of headers to an endpoint.
+ * New: `@JsonAdapter` annotations on the `@Body` parameter and on the method will be propagated to Moshi
+   for creating the request and response adapters, respectively.
+ * Fix: Honor the `Content-Type` encoding of XML responses when deserializing response bodies.
+ * Fix: Remove the stacktrace from fake network exceptions created from retrofit-mock's `NetworkBehavior`.
+   They had the potential to be misleading and look like a library issue.
+ * Fix: Eagerly catch malformed `Content-Type` headers supplied via `@Header` or `@Headers`.
+
+
 Version 2.0.2 *(2016-04-14)*
 ----------------------------
 
@@ -300,7 +417,7 @@ Version 1.5.0 *(2014-03-20)*
  * Fix: Support empty HTTP response status reason.
  * If an `ErrorHandler` is supplied it will be invoked for `Callback` and `Observable` methods.
  * HTTP `PATCH` method using `HttpUrlConnection` is no longer supported. Add the
-   [OkHttp](http://square.github.io/okhttp) jar to your project if you need this behavior.
+   [OkHttp](https://square.github.io/okhttp) jar to your project if you need this behavior.
  * Custom `Client` implementations should no longer set `Content-Type` or `Content-Length` headers
    based on the `TypedInput` body of the `Request`. These headers will now be added automatically
    as part of the standard `Request` header list.
@@ -353,7 +470,7 @@ Version 1.2.2 *(2013-09-12)*
 Version 1.2.1 *(2013-08-30)*
 ----------------------------
 
- * New: Converter for [Wire protocol buffers](http://github.com/square/wire)!
+ * New: Converter for [Wire protocol buffers](https://github.com/square/wire)!
 
 
 Version 1.2.0 *(2013-08-23)*
@@ -415,3 +532,6 @@ Version 1.0.0 *(2013-05-13)*
 ----------------------------
 
 Initial release.
+
+
+ [maven_provided]: https://maven.apache.org/guides/introduction/introduction-to-dependency-mechanism.html

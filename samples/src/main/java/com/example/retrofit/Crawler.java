@@ -27,6 +27,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import javax.annotation.Nullable;
 import okhttp3.ConnectionPool;
 import okhttp3.Dispatcher;
 import okhttp3.HttpUrl;
@@ -77,7 +78,7 @@ public final class Crawler {
         // Enqueue its links for visiting.
         for (String link : page.links) {
           HttpUrl linkUrl = base.resolve(link);
-          if (linkUrl != null && !fetchedUrls.add(linkUrl)) {
+          if (linkUrl != null && fetchedUrls.add(linkUrl)) {
             crawlPage(linkUrl);
           }
         }
@@ -100,7 +101,7 @@ public final class Crawler {
         .build();
 
     Retrofit retrofit = new Retrofit.Builder()
-        .baseUrl(HttpUrl.parse("https://example.com/"))
+        .baseUrl(HttpUrl.get("https://example.com/"))
         .addConverterFactory(PageAdapter.FACTORY)
         .client(okHttpClient)
         .build();
@@ -108,7 +109,7 @@ public final class Crawler {
     PageService pageService = retrofit.create(PageService.class);
 
     Crawler crawler = new Crawler(pageService);
-    crawler.crawlPage(HttpUrl.parse(args[0]));
+    crawler.crawlPage(HttpUrl.get(args[0]));
   }
 
   interface PageService {
@@ -116,10 +117,10 @@ public final class Crawler {
   }
 
   static class Page {
-    public final String title;
-    public final List<String> links;
+    final String title;
+    final List<String> links;
 
-    public Page(String title, List<String> links) {
+    Page(String title, List<String> links) {
       this.title = title;
       this.links = links;
     }
@@ -127,7 +128,7 @@ public final class Crawler {
 
   static final class PageAdapter implements Converter<ResponseBody, Page> {
     static final Converter.Factory FACTORY = new Converter.Factory() {
-      @Override public Converter<ResponseBody, ?> responseBodyConverter(
+      @Override public @Nullable Converter<ResponseBody, ?> responseBodyConverter(
           Type type, Annotation[] annotations, Retrofit retrofit) {
         if (type == Page.class) return new PageAdapter();
         return null;

@@ -19,6 +19,7 @@ import java.io.IOException;
 import java.lang.annotation.Annotation;
 import java.lang.reflect.Type;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import okhttp3.Interceptor;
@@ -48,6 +49,7 @@ import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
+import static retrofit2.TestingUtils.repeat;
 
 public final class CallTest {
   @Rule public final MockWebServer server = new MockWebServer();
@@ -420,6 +422,31 @@ public final class CallTest {
     verifyNoMoreInteractions(converter);
   }
 
+  @Test public void converterBodyDoesNotLeakContentInIntermediateBuffers() throws IOException {
+    Retrofit retrofit = new Retrofit.Builder()
+        .baseUrl(server.url("/"))
+        .addConverterFactory(new Converter.Factory() {
+          @Override public Converter<ResponseBody, ?> responseBodyConverter(Type type,
+              Annotation[] annotations, Retrofit retrofit) {
+            return new Converter<ResponseBody, String>() {
+              @Override public String convert(ResponseBody value) throws IOException {
+                String prefix = value.source().readUtf8(2);
+                value.source().skip(20_000 - 4);
+                String suffix = value.source().readUtf8();
+                return prefix + suffix;
+              }
+            };
+          }
+        })
+        .build();
+    Service example = retrofit.create(Service.class);
+
+    server.enqueue(new MockResponse().setBody(repeat('a', 10_000) + repeat('b', 10_000)));
+
+    Response<String> response = example.getString().execute();
+    assertThat(response.body()).isEqualTo("aabb");
+  }
+
   @Test public void executeCallOnce() throws IOException {
     Retrofit retrofit = new Retrofit.Builder()
         .baseUrl(server.url("/"))
@@ -674,6 +701,40 @@ public final class CallTest {
     assertThat(failureRef.get()).isInstanceOf(IOException.class).hasMessage("Canceled");
   }
 
+  @Test public void cancelOkHttpRequest() throws InterruptedException {
+    OkHttpClient client = new OkHttpClient();
+    Retrofit retrofit = new Retrofit.Builder()
+        .baseUrl(server.url("/"))
+        .client(client)
+        .addConverterFactory(new ToStringConverterFactory())
+        .build();
+    Service service = retrofit.create(Service.class);
+
+    server.enqueue(new MockResponse().setSocketPolicy(SocketPolicy.NO_RESPONSE));
+
+    Call<String> call = service.getString();
+
+    final AtomicReference<Throwable> failureRef = new AtomicReference<>();
+    final CountDownLatch latch = new CountDownLatch(1);
+    call.enqueue(new Callback<String>() {
+      @Override public void onResponse(Call<String> call, Response<String> response) {
+        throw new AssertionError();
+      }
+
+      @Override public void onFailure(Call<String> call, Throwable t) {
+        failureRef.set(t);
+        latch.countDown();
+      }
+    });
+
+    // Cancel the underlying HTTP Call. Should be reflected accurately back in the Retrofit Call.
+    client.dispatcher().cancelAll();
+    assertThat(call.isCanceled()).isTrue();
+
+    assertTrue(latch.await(10, SECONDS));
+    assertThat(failureRef.get()).isInstanceOf(IOException.class).hasMessage("Canceled");
+  }
+
   @Test public void requestBeforeExecuteCreates() throws IOException {
     Retrofit retrofit = new Retrofit.Builder()
         .baseUrl(server.url("/"))
@@ -734,6 +795,41 @@ public final class CallTest {
     assertThat(writeCount.get()).isEqualTo(1);
   }
 
+  @Test public void requestThrowingNonFatalErrorBeforeExecuteFailsExecute() throws IOException {
+    Retrofit retrofit = new Retrofit.Builder()
+        .baseUrl(server.url("/"))
+        .addConverterFactory(new ToStringConverterFactory())
+        .build();
+    Service service = retrofit.create(Service.class);
+
+    server.enqueue(new MockResponse());
+
+    final AtomicInteger writeCount = new AtomicInteger();
+    Object a = new Object() {
+      @Override public String toString() {
+        writeCount.incrementAndGet();
+        throw new Error("Broken!");
+      }
+    };
+    Call<String> call = service.postRequestBody(a);
+
+    try {
+      call.request();
+      fail();
+    } catch (Error e) {
+      assertThat(e).hasMessage("Broken!");
+    }
+    assertThat(writeCount.get()).isEqualTo(1);
+
+    try {
+      call.execute();
+      fail();
+    } catch (Error e) {
+      assertThat(e).hasMessage("Broken!");
+    }
+    assertThat(writeCount.get()).isEqualTo(1);
+  }
+
   @Test public void requestAfterExecuteReturnsCachedValue() throws IOException {
     Retrofit retrofit = new Retrofit.Builder()
         .baseUrl(server.url("/"))
@@ -789,6 +885,41 @@ public final class CallTest {
       call.request();
       fail();
     } catch (RuntimeException e) {
+      assertThat(e).hasMessage("Broken!");
+    }
+    assertThat(writeCount.get()).isEqualTo(1);
+  }
+
+  @Test public void requestAfterExecuteThrowingAlsoThrowsForNonFatalErrors() throws IOException {
+    Retrofit retrofit = new Retrofit.Builder()
+        .baseUrl(server.url("/"))
+        .addConverterFactory(new ToStringConverterFactory())
+        .build();
+    Service service = retrofit.create(Service.class);
+
+    server.enqueue(new MockResponse());
+
+    final AtomicInteger writeCount = new AtomicInteger();
+    Object a = new Object() {
+      @Override public String toString() {
+        writeCount.incrementAndGet();
+        throw new Error("Broken!");
+      }
+    };
+    Call<String> call = service.postRequestBody(a);
+
+    try {
+      call.execute();
+      fail();
+    } catch (Error e) {
+      assertThat(e).hasMessage("Broken!");
+    }
+    assertThat(writeCount.get()).isEqualTo(1);
+
+    try {
+      call.request();
+      fail();
+    } catch (Error e) {
       assertThat(e).hasMessage("Broken!");
     }
     assertThat(writeCount.get()).isEqualTo(1);
@@ -862,6 +993,47 @@ public final class CallTest {
 
       @Override public void onFailure(Call<String> call, Throwable t) {
         assertThat(t).isExactlyInstanceOf(RuntimeException.class).hasMessage("Broken!");
+        assertThat(writeCount.get()).isEqualTo(1);
+        latch.countDown();
+      }
+    });
+    assertTrue(latch.await(10, SECONDS));
+  }
+
+  @Test public void requestThrowingNonFatalErrorBeforeEnqueueFailsEnqueue()
+      throws IOException, InterruptedException {
+    Retrofit retrofit = new Retrofit.Builder()
+        .baseUrl(server.url("/"))
+        .addConverterFactory(new ToStringConverterFactory())
+        .build();
+    Service service = retrofit.create(Service.class);
+
+    server.enqueue(new MockResponse());
+
+    final AtomicInteger writeCount = new AtomicInteger();
+    Object a = new Object() {
+      @Override public String toString() {
+        writeCount.incrementAndGet();
+        throw new Error("Broken!");
+      }
+    };
+    Call<String> call = service.postRequestBody(a);
+
+    try {
+      call.request();
+      fail();
+    } catch (Error e) {
+      assertThat(e).hasMessage("Broken!");
+    }
+    assertThat(writeCount.get()).isEqualTo(1);
+
+    final CountDownLatch latch = new CountDownLatch(1);
+    call.enqueue(new Callback<String>() {
+      @Override public void onResponse(Call<String> call, Response<String> response) {
+      }
+
+      @Override public void onFailure(Call<String> call, Throwable t) {
+        assertThat(t).isExactlyInstanceOf(Error.class).hasMessage("Broken!");
         assertThat(writeCount.get()).isEqualTo(1);
         latch.countDown();
       }
@@ -943,5 +1115,160 @@ public final class CallTest {
       assertThat(e).hasMessage("Broken!");
     }
     assertThat(writeCount.get()).isEqualTo(1);
+  }
+
+  @Test public void requestAfterEnqueueFailingThrowsForNonFatalErrors() throws IOException,
+      InterruptedException {
+    Retrofit retrofit = new Retrofit.Builder()
+        .baseUrl(server.url("/"))
+        .addConverterFactory(new ToStringConverterFactory())
+        .build();
+    Service service = retrofit.create(Service.class);
+
+    server.enqueue(new MockResponse());
+
+    final AtomicInteger writeCount = new AtomicInteger();
+    Object a = new Object() {
+      @Override public String toString() {
+        writeCount.incrementAndGet();
+        throw new Error("Broken!");
+      }
+    };
+    Call<String> call = service.postRequestBody(a);
+
+    final CountDownLatch latch = new CountDownLatch(1);
+    call.enqueue(new Callback<String>() {
+      @Override public void onResponse(Call<String> call, Response<String> response) {
+      }
+
+      @Override public void onFailure(Call<String> call, Throwable t) {
+        assertThat(t).isExactlyInstanceOf(Error.class).hasMessage("Broken!");
+        assertThat(writeCount.get()).isEqualTo(1);
+        latch.countDown();
+      }
+    });
+    assertTrue(latch.await(10, SECONDS));
+
+    try {
+      call.request();
+      fail();
+    } catch (Error e) {
+      assertThat(e).hasMessage("Broken!");
+    }
+    assertThat(writeCount.get()).isEqualTo(1);
+  }
+
+  @Test public void fatalErrorsAreNotCaughtRequest() throws Exception {
+    Retrofit retrofit = new Retrofit.Builder()
+        .baseUrl(server.url("/"))
+        .addConverterFactory(new ToStringConverterFactory())
+        .build();
+    Service service = retrofit.create(Service.class);
+
+    server.enqueue(new MockResponse());
+
+    final AtomicInteger writeCount = new AtomicInteger();
+    Object a = new Object() {
+      @Override public String toString() {
+        writeCount.incrementAndGet();
+        throw new OutOfMemoryError("Broken!");
+      }
+    };
+    Call<String> call = service.postRequestBody(a);
+
+    try {
+      call.request();
+      fail();
+    } catch (OutOfMemoryError e) {
+      assertThat(e).hasMessage("Broken!");
+    }
+    assertThat(writeCount.get()).isEqualTo(1);
+
+    try {
+      call.request();
+      fail();
+    } catch (OutOfMemoryError e) {
+      assertThat(e).hasMessage("Broken!");
+    }
+    assertThat(writeCount.get()).isEqualTo(2);
+  }
+
+  @Test public void fatalErrorsAreNotCaughtEnqueue() throws Exception {
+    Retrofit retrofit = new Retrofit.Builder()
+        .baseUrl(server.url("/"))
+        .addConverterFactory(new ToStringConverterFactory())
+        .build();
+    Service service = retrofit.create(Service.class);
+
+    server.enqueue(new MockResponse());
+
+    final AtomicInteger writeCount = new AtomicInteger();
+    Object a = new Object() {
+      @Override public String toString() {
+        writeCount.incrementAndGet();
+        throw new OutOfMemoryError("Broken!");
+      }
+    };
+    Call<String> call = service.postRequestBody(a);
+
+    try {
+      final AtomicBoolean callsFailureSynchronously = new AtomicBoolean();
+      call.enqueue(new Callback<String>() {
+        @Override public void onResponse(Call<String> call, Response<String> response) {
+        }
+
+        @Override public void onFailure(Call<String> call, Throwable t) {
+          callsFailureSynchronously.set(true); // Will not be called for fatal errors.
+        }
+      });
+      assertThat(callsFailureSynchronously.get()).isFalse();
+      fail();
+    } catch (OutOfMemoryError e) {
+      assertThat(e).hasMessage("Broken!");
+    }
+    assertThat(writeCount.get()).isEqualTo(1);
+
+    try {
+      call.request();
+      fail();
+    } catch (OutOfMemoryError e) {
+      assertThat(e).hasMessage("Broken!");
+    }
+    assertThat(writeCount.get()).isEqualTo(2);
+  }
+
+  @Test public void fatalErrorsAreNotCaughtExecute() throws Exception {
+    Retrofit retrofit = new Retrofit.Builder()
+        .baseUrl(server.url("/"))
+        .addConverterFactory(new ToStringConverterFactory())
+        .build();
+    Service service = retrofit.create(Service.class);
+
+    server.enqueue(new MockResponse());
+
+    final AtomicInteger writeCount = new AtomicInteger();
+    Object a = new Object() {
+      @Override public String toString() {
+        writeCount.incrementAndGet();
+        throw new OutOfMemoryError("Broken!");
+      }
+    };
+    Call<String> call = service.postRequestBody(a);
+
+    try {
+      call.execute();
+      fail();
+    } catch (OutOfMemoryError e) {
+      assertThat(e).hasMessage("Broken!");
+    }
+    assertThat(writeCount.get()).isEqualTo(1);
+
+    try {
+      call.request();
+      fail();
+    } catch (OutOfMemoryError e) {
+      assertThat(e).hasMessage("Broken!");
+    }
+    assertThat(writeCount.get()).isEqualTo(2);
   }
 }
